@@ -3,7 +3,7 @@
 #include "sensesp/sensors/digital_pcnt_input.h"
 #include "sensesp/sensors/sensor.h"
 #include "sensesp/signalk/signalk_output.h"
-#include "sensesp/transforms/frequency.h"
+#include "sensesp/transforms/lambda_transform.h"
 #include "sensesp/transforms/linear.h"
 #include "sensesp_app_builder.h"
 
@@ -15,6 +15,13 @@ constexpr uint8_t kRpmPulsePin = 4;
 
 constexpr unsigned int kAnalogReadIntervalMs = 500;
 constexpr unsigned int kRpmReadIntervalMs = 500;
+constexpr float kMillivoltsPerVolt = 1000.0f;
+constexpr float kMillisecondsPerSecond = 1000.0f;
+constexpr float kCoolantTempCelsiusPerVolt = 20.0f;
+constexpr float kCoolantKelvinOffset = 273.15f;
+constexpr float kOilPressurePaPerVolt = 100000.0f;
+constexpr float kOilPressureOffsetPa = 0.0f;
+constexpr float kRpmPulsesPerRevolution = 2.0f;
 
 void setup() {
   SetupLogging();
@@ -23,24 +30,32 @@ void setup() {
   sensesp_app = builder.set_hostname("engine-monitor")->get_app();
 
   auto* coolant_input = new RepeatSensor<float>(kAnalogReadIntervalMs, []() {
-    return analogReadMilliVolts(kCoolantTempPin) / 1000.0f;
+    return analogReadMilliVolts(kCoolantTempPin) / kMillivoltsPerVolt;
   });
-  auto* coolant_temp_kelvin = new Linear(20.0f, 273.15f, "/coolant/linear");
+  auto* coolant_temp_kelvin = new Linear(kCoolantTempCelsiusPerVolt,
+                                         kCoolantKelvinOffset,
+                                         "/coolant/linear");
   coolant_input->connect_to(coolant_temp_kelvin)->connect_to(
-      new SKOutputFloat("propulsion.main.temperature"));
+      new SKOutputFloat("propulsion.main.coolantTemperature"));
 
   auto* oil_input = new RepeatSensor<float>(kAnalogReadIntervalMs, []() {
-    return analogReadMilliVolts(kOilPressurePin) / 1000.0f;
+    return analogReadMilliVolts(kOilPressurePin) / kMillivoltsPerVolt;
   });
-  auto* oil_pressure_pa = new Linear(100000.0f, 0.0f, "/oil_pressure/linear");
+  auto* oil_pressure_pa = new Linear(kOilPressurePaPerVolt,
+                                     kOilPressureOffsetPa,
+                                     "/oil_pressure/linear");
   oil_input->connect_to(oil_pressure_pa)->connect_to(
       new SKOutputFloat("propulsion.main.oilPressure"));
 
   auto* rpm_counter = new DigitalInputPcntCounter(
       kRpmPulsePin, INPUT_PULLUP, RISING, kRpmReadIntervalMs);
-  auto* rpm_frequency_hz = new Frequency(1.0f / 60.0f, "/rpm/frequency");
-  rpm_counter->connect_to(rpm_frequency_hz)->connect_to(
-      new SKOutput<float>("propulsion.main.revolutions"));
+  auto* revolutions_per_second =
+      new LambdaTransform<int, float>([](int pulses_in_interval) {
+        return (kMillisecondsPerSecond * pulses_in_interval) /
+               (kRpmReadIntervalMs * kRpmPulsesPerRevolution);
+      });
+  rpm_counter->connect_to(revolutions_per_second)->connect_to(
+      new SKOutputFloat("propulsion.main.revolutions"));
 }
 
 void loop() { event_loop()->tick(); }

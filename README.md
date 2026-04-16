@@ -3,9 +3,13 @@
 This repository contains a starter SensESP firmware that publishes common engine
 signals to Signal K:
 
-- `propulsion.main.temperature` (Kelvin)
+- `propulsion.main.coolantTemperature` (Kelvin)
 - `propulsion.main.oilPressure` (Pa)
 - `propulsion.main.revolutions` (Hz)
+
+Current defaults are intentionally generic and should be calibrated for your
+hardware (for example: coolant volts->°C slope, oil pressure volts->Pa slope,
+and tachometer pulses-per-revolution).
 
 ## What this implements
 
@@ -20,7 +24,7 @@ includes:
 
 To fully replicate your existing ESPHome setup, provide:
 
-- The blog post describing the ESPHome solution.
+- Documentation describing your ESPHome solution (blog post, notes, or design).
 - The current ESPHome YAML/config files.
 
 Those details are needed to map calibration, pin assignments, update rates, and
