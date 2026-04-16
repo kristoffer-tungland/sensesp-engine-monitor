@@ -22,6 +22,7 @@ constexpr uint32_t kTempReadMs = 10000;
 constexpr uint32_t kOilFuelReadMs = 1000;
 constexpr uint32_t kRpmReadMs = 1000;
 constexpr uint32_t kHoursReadMs = 5000;
+constexpr float kSecondsPerHour = 3600.0f;
 
 constexpr float kKelvinOffset = 273.15f;
 constexpr float kPulsesPerRevolution = 1.0f;
@@ -34,10 +35,10 @@ constexpr float kOilMaxBar = 10.0f;
 constexpr float kFuelEmptyShuntMv = 0.0f;
 constexpr float kFuelFullShuntMv = 100.0f;
 
-OneWire one_wire(kDs18b20Pin);
-DallasTemperature temp_bus(&one_wire);
-Adafruit_INA219 oil_sensor(0x40);
-Adafruit_INA219 fuel_sensor(0x41);
+OneWire* one_wire = nullptr;
+DallasTemperature* temp_bus = nullptr;
+Adafruit_INA219* oil_sensor = nullptr;
+Adafruit_INA219* fuel_sensor = nullptr;
 
 float latest_rpm = 0.0f;
 double engine_run_seconds = 0.0;
@@ -45,6 +46,7 @@ volatile uint32_t tach_pulse_count = 0;
 float cached_temps_kelvin[kTempSensorCount] = {NAN, NAN, NAN, NAN};
 uint32_t last_temp_poll_ms = 0;
 portMUX_TYPE state_mux = portMUX_INITIALIZER_UNLOCKED;
+portMUX_TYPE tach_mux = portMUX_INITIALIZER_UNLOCKED;
 
 float clampf(float value, float min_value, float max_value) {
   return value < min_value ? min_value : (value > max_value ? max_value : value);
@@ -52,7 +54,7 @@ float clampf(float value, float min_value, float max_value) {
 
 float map_range(float input, float in_min, float in_max, float out_min,
                 float out_max) {
-  if (in_max <= in_min) {
+  if (in_max == in_min) {
     return out_min;
   }
   const float t = (input - in_min) / (in_max - in_min);
@@ -72,9 +74,9 @@ float read_temperature_kelvin(uint8_t index) {
 
   if (should_refresh) {
     float samples[kTempSensorCount];
-    temp_bus.requestTemperatures();
+    temp_bus->requestTemperatures();
     for (uint8_t i = 0; i < kTempSensorCount; i++) {
-      const float celsius = temp_bus.getTempCByIndex(i);
+      const float celsius = temp_bus->getTempCByIndex(i);
       samples[i] = (celsius == DEVICE_DISCONNECTED_C) ? NAN : celsius + kKelvinOffset;
     }
 
@@ -91,19 +93,32 @@ float read_temperature_kelvin(uint8_t index) {
   return value;
 }
 
-void IRAM_ATTR on_tach_pulse() { tach_pulse_count++; }
+void IRAM_ATTR on_tach_pulse() {
+  portENTER_CRITICAL_ISR(&tach_mux);
+  tach_pulse_count++;
+  portEXIT_CRITICAL_ISR(&tach_mux);
+}
 }  // namespace
 
 void setup() {
   SetupLogging();
 
   SensESPAppBuilder builder;
-  sensesp_app = builder.get_app();
+  sensesp_app = builder.get_app();  // Initializes global app instance used by SensESP runtime.
 
-  temp_bus.begin();
+  static OneWire one_wire_instance(kDs18b20Pin);
+  static DallasTemperature temp_bus_instance(&one_wire_instance);
+  static Adafruit_INA219 oil_sensor_instance(0x40);
+  static Adafruit_INA219 fuel_sensor_instance(0x41);
+  one_wire = &one_wire_instance;
+  temp_bus = &temp_bus_instance;
+  oil_sensor = &oil_sensor_instance;
+  fuel_sensor = &fuel_sensor_instance;
+
+  temp_bus->begin();
   Wire.begin(kI2cSdaPin, kI2cSclPin);
-  oil_sensor.begin();
-  fuel_sensor.begin();
+  oil_sensor->begin();
+  fuel_sensor->begin();
   pinMode(kTachPin, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(kTachPin), on_tach_pulse, RISING);
 
@@ -130,7 +145,7 @@ void setup() {
       new SKOutputFloat("propulsion.engine.temperature.thermostat"));
 
   auto* oil_pressure = new RepeatSensor<float>(kOilFuelReadMs, []() {
-    const float shunt_mv = oil_sensor.getShuntVoltage_mV();
+    const float shunt_mv = oil_sensor->getShuntVoltage_mV();
     const float bar = map_range(shunt_mv, kOilMinShuntMv, kOilMaxShuntMv, 0.0f,
                                 kOilMaxBar);
     return clampf(bar, 0.0f, kOilMaxBar);
@@ -138,7 +153,7 @@ void setup() {
   oil_pressure->connect_to(new SKOutputFloat("propulsion.engine.oilPressure"));
 
   auto* fuel_level = new RepeatSensor<float>(kOilFuelReadMs, []() {
-    const float shunt_mv = fuel_sensor.getShuntVoltage_mV();
+    const float shunt_mv = fuel_sensor->getShuntVoltage_mV();
     const float pct =
         map_range(shunt_mv, kFuelEmptyShuntMv, kFuelFullShuntMv, 0.0f, 1.0f);
     return clampf(pct, 0.0f, 1.0f);
@@ -146,15 +161,13 @@ void setup() {
   fuel_level->connect_to(new SKOutputFloat("tanks.fuel.level"));
 
   auto* rpm_sensor = new RepeatSensor<float>(kRpmReadMs, []() {
-    noInterrupts();
+    portENTER_CRITICAL(&tach_mux);
     const uint32_t pulses = tach_pulse_count;
     tach_pulse_count = 0;
-    interrupts();
+    portEXIT_CRITICAL(&tach_mux);
 
     const float seconds = static_cast<float>(kRpmReadMs) / 1000.0f;
-    const float rps = (seconds > 0.0f)
-                          ? (static_cast<float>(pulses) / kPulsesPerRevolution) / seconds
-                          : 0.0f;
+    const float rps = (static_cast<float>(pulses) / kPulsesPerRevolution) / seconds;
     const float rpm = rps * 60.0f;
 
     portENTER_CRITICAL(&state_mux);
@@ -165,7 +178,15 @@ void setup() {
     portEXIT_CRITICAL(&state_mux);
     return rpm;
   });
-  rpm_sensor->connect_to(new SKOutputFloat("propulsion.engine.revolutions"));
+  rpm_sensor->connect_to(new SKOutputFloat("propulsion.engine.rpm"));
+
+  auto* revolutions = new RepeatSensor<float>(kRpmReadMs, []() {
+    portENTER_CRITICAL(&state_mux);
+    const float rps = latest_rpm / 60.0f;
+    portEXIT_CRITICAL(&state_mux);
+    return rps;
+  });
+  revolutions->connect_to(new SKOutputFloat("propulsion.engine.revolutions"));
 
   auto* engine_active = new RepeatSensor<bool>(kRpmReadMs, []() {
     portENTER_CRITICAL(&state_mux);
@@ -177,7 +198,7 @@ void setup() {
 
   auto* engine_hours = new RepeatSensor<float>(kHoursReadMs, []() {
     portENTER_CRITICAL(&state_mux);
-    const float hours = static_cast<float>(engine_run_seconds / 3600.0);
+    const float hours = static_cast<float>(engine_run_seconds / kSecondsPerHour);
     portEXIT_CRITICAL(&state_mux);
     return hours;
   });

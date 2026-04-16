@@ -34,7 +34,8 @@ python3 -m platformio device monitor
 - `propulsion.engine.temperature.thermostat` (K)
 - `propulsion.engine.oilPressure` (bar)
 - `tanks.fuel.level` (ratio 0.0-1.0)
-- `propulsion.engine.revolutions` (rpm)
+- `propulsion.engine.revolutions` (Hz / revolutions per second)
+- `propulsion.engine.rpm` (rpm)
 - `propulsion.engine.isRunning` (bool)
 - `propulsion.engine.hours` (hours)
 
@@ -42,4 +43,3 @@ python3 -m platformio device monitor
 
 - Oil/fuel conversion constants are in `src/main.cpp` and should be calibrated to your senders.
 - SensESP networking is configured through the standard SensESP provisioning workflow.
-
