@@ -42,6 +42,9 @@ Adafruit_INA219 fuel_sensor(0x41);
 float latest_rpm = 0.0f;
 double engine_run_seconds = 0.0;
 volatile uint32_t tach_pulse_count = 0;
+float cached_temps_kelvin[kTempSensorCount] = {NAN, NAN, NAN, NAN};
+uint32_t last_temp_poll_ms = 0;
+portMUX_TYPE state_mux = portMUX_INITIALIZER_UNLOCKED;
 
 float clampf(float value, float min_value, float max_value) {
   return value < min_value ? min_value : (value > max_value ? max_value : value);
@@ -57,12 +60,35 @@ float map_range(float input, float in_min, float in_max, float out_min,
 }
 
 float read_temperature_kelvin(uint8_t index) {
-  temp_bus.requestTemperatures();
-  const float celsius = temp_bus.getTempCByIndex(index);
-  if (celsius == DEVICE_DISCONNECTED_C) {
-    return NAN;
+  const uint32_t now = millis();
+  bool should_refresh = false;
+
+  portENTER_CRITICAL(&state_mux);
+  if (last_temp_poll_ms == 0 || (now - last_temp_poll_ms) >= kTempReadMs) {
+    last_temp_poll_ms = now;
+    should_refresh = true;
   }
-  return celsius + kKelvinOffset;
+  portEXIT_CRITICAL(&state_mux);
+
+  if (should_refresh) {
+    float samples[kTempSensorCount];
+    temp_bus.requestTemperatures();
+    for (uint8_t i = 0; i < kTempSensorCount; i++) {
+      const float celsius = temp_bus.getTempCByIndex(i);
+      samples[i] = (celsius == DEVICE_DISCONNECTED_C) ? NAN : celsius + kKelvinOffset;
+    }
+
+    portENTER_CRITICAL(&state_mux);
+    for (uint8_t i = 0; i < kTempSensorCount; i++) {
+      cached_temps_kelvin[i] = samples[i];
+    }
+    portEXIT_CRITICAL(&state_mux);
+  }
+
+  portENTER_CRITICAL(&state_mux);
+  const float value = cached_temps_kelvin[index];
+  portEXIT_CRITICAL(&state_mux);
+  return value;
 }
 
 void IRAM_ATTR on_tach_pulse() { tach_pulse_count++; }
@@ -126,22 +152,35 @@ void setup() {
     interrupts();
 
     const float seconds = static_cast<float>(kRpmReadMs) / 1000.0f;
-    const float rps = (seconds > 0.0f) ? (pulses / kPulsesPerRevolution) / seconds : 0.0f;
+    const float rps = (seconds > 0.0f)
+                          ? (static_cast<float>(pulses) / kPulsesPerRevolution) / seconds
+                          : 0.0f;
     const float rpm = rps * 60.0f;
+
+    portENTER_CRITICAL(&state_mux);
     latest_rpm = rpm;
     if (rpm > kRunningThresholdRpm) {
       engine_run_seconds += static_cast<double>(kRpmReadMs) / 1000.0;
     }
+    portEXIT_CRITICAL(&state_mux);
     return rpm;
   });
   rpm_sensor->connect_to(new SKOutputFloat("propulsion.engine.revolutions"));
 
-  auto* engine_active =
-      new RepeatSensor<bool>(kRpmReadMs, []() { return latest_rpm > kRunningThresholdRpm; });
+  auto* engine_active = new RepeatSensor<bool>(kRpmReadMs, []() {
+    portENTER_CRITICAL(&state_mux);
+    const bool running = latest_rpm > kRunningThresholdRpm;
+    portEXIT_CRITICAL(&state_mux);
+    return running;
+  });
   engine_active->connect_to(new SKOutput<bool>("propulsion.engine.isRunning"));
 
-  auto* engine_hours =
-      new RepeatSensor<float>(kHoursReadMs, []() { return engine_run_seconds / 3600.0; });
+  auto* engine_hours = new RepeatSensor<float>(kHoursReadMs, []() {
+    portENTER_CRITICAL(&state_mux);
+    const float hours = static_cast<float>(engine_run_seconds / 3600.0);
+    portEXIT_CRITICAL(&state_mux);
+    return hours;
+  });
   engine_hours->connect_to(new SKOutputFloat("propulsion.engine.hours"));
 }
 
