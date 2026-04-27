@@ -4,6 +4,7 @@
 #include "config/EngineConfig.hpp"
 #include "sensesp/sensors/sensor.h"
 #include "sensesp/signalk/signalk_output.h"
+#include "sensesp/transforms/linear.h"
 #include "sensesp_app_builder.h"
 #include "sensors/INA219Reader.hpp"
 #include "sensors/TachRpmTracker.hpp"
@@ -61,7 +62,13 @@ void setup() {
                                               config::kOilMaxBar);
     return INA219Reader::clamp(bar, 0.0f, config::kOilMaxBar);
   });
-  oil_pressure->connect_to(new SKOutputFloat("propulsion.engine.oilPressure"));
+  auto* oil_cal = new Linear(1.0f, 0.0f, "/oil/calibration");
+  ConfigItem(oil_cal)
+      ->set_title("Oil Pressure Calibration")
+      ->set_description("Scale and offset applied to the oil pressure output (bar).")
+      ->set_sort_order(100);
+  oil_pressure->connect_to(oil_cal)->connect_to(
+      new SKOutputFloat("propulsion.engine.oilPressure"));
 
   auto* fuel_level = new RepeatSensor<float>(config::kOilFuelReadMs, []() {
     const float shunt_mv = fuel_sensor.read_shunt_mv();
@@ -70,12 +77,24 @@ void setup() {
                                 config::kFuelFullShuntMv, 0.0f, 1.0f);
     return INA219Reader::clamp(pct, 0.0f, 1.0f);
   });
-  fuel_level->connect_to(new SKOutputFloat("tanks.fuel.level"));
+  auto* fuel_cal = new Linear(1.0f, 0.0f, "/fuel/calibration");
+  ConfigItem(fuel_cal)
+      ->set_title("Fuel Level Calibration")
+      ->set_description("Scale and offset applied to the fuel level output (0.0–1.0).")
+      ->set_sort_order(200);
+  fuel_level->connect_to(fuel_cal)->connect_to(
+      new SKOutputFloat("tanks.fuel.level"));
 
   auto* rpm_sensor = new RepeatSensor<float>(config::kRpmReadMs, []() {
     return tach.sample_rpm(config::kRpmReadMs);
   });
-  rpm_sensor->connect_to(new SKOutputFloat("propulsion.engine.rpm"));
+  auto* rpm_cal = new Linear(1.0f, 0.0f, "/rpm/calibration");
+  ConfigItem(rpm_cal)
+      ->set_title("RPM Calibration")
+      ->set_description("Scale factor for RPM (adjust if pulses-per-revolution differs from default).")
+      ->set_sort_order(300);
+  rpm_sensor->connect_to(rpm_cal)->connect_to(
+      new SKOutputFloat("propulsion.engine.rpm"));
 
   auto* revolutions = new RepeatSensor<float>(config::kRpmReadMs, []() {
     return tach.rps();
